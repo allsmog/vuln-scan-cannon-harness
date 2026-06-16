@@ -1,0 +1,3 @@
+detector: secrets
+language: Python
+description: A config file with two real hardcoded secrets and one base64 example that the entropy heuristic over-flags.

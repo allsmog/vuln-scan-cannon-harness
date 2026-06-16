@@ -1,0 +1,4 @@
+detector: static_review
+language: python
+description: "Tiny Flask-style app used to demo the permutation planner — carries real git history (a past SQLi fix + a churn hotspot) and a dependency manifest (Flask, PyYAML) so the commit-archaeology and threat-intel signals fire."
+focus_areas: []

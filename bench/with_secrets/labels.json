@@ -1,0 +1,4 @@
+[
+  { "file": "conf.py", "line": 3, "cwe": "CWE-798", "note": "AWS access key id" },
+  { "file": "conf.py", "line": 4, "cwe": "CWE-798", "note": "hardcoded API token" }
+]

@@ -1,0 +1,9 @@
+# cannon fleet fleet.example.yaml
+#
+# Scans each target, merges confirmed findings into its ledger, then composes
+# ATTACK CHAINS THAT SPAN SERVICES — e.g. a secret leaked by one service that
+# unlocks an injection in another. Each entry is a target name under targets/
+# or a path to a target directory.
+targets:
+  - canary
+  - bench/with_secrets

@@ -1,0 +1,3 @@
+detector: secrets
+language: Python
+description: A clean file with no secrets — tests that the detector produces no false positives.

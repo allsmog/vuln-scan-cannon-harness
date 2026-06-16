@@ -1,0 +1,13 @@
+detector: static_review
+language: Python
+description: >
+  A tiny intentionally-vulnerable Flask app used to smoke-test cannon. It has a
+  handful of planted bugs (SQLi, command injection, path traversal, a hardcoded
+  secret) and one false-positive bait (a parameterized query that only looks
+  dangerous), so you can watch the adversarial verifier confirm the real ones
+  and reject the bait.
+
+# Two focus areas → a 2-round salvo at --runs 1. Bump --runs to sample variance.
+focus_areas:
+  - "Request handlers in app.py — user-controlled request data reaching SQL, shell, or filesystem sinks"
+  - "Secrets, auth, and access control in app.py — token/secret handling and who-can-do-what checks"

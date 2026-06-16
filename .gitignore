@@ -1,0 +1,43 @@
+# ── Rust ─────────────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+# (Cargo.lock IS committed — this is a binary/app, for reproducible builds.)
+
+# ── cannon: generated scan-run outputs ──────────────────────────────────────
+results/
+
+# ── cannon: generated per-target state (ledger / queue / graph / evolution) ──
+**/.cannon/
+targets/*/VULN_FINDINGS.md
+targets/*/THREAT_MODEL.md
+targets/*/CHAINS.md
+targets/*/chains.json
+targets/*/threat_model.json
+targets/*/repo_map.json
+targets/*/findings.sarif
+targets/*/report.sarif
+targets/*/PATCHES/
+
+# ── cannon: evolved prompt variants (bred by `permute --sources evolution`) ──
+prompts/variants/g*/
+
+# ── cannon: benchmark / tuning outputs ──────────────────────────────────────
+**/bench.json
+**/tune.json
+**/bench-baseline.json
+
+# ── demo runtime ────────────────────────────────────────────────────────────
+*.db
+*.sqlite
+
+# ── Python prototype ─────────────────────────────────────────────────────────
+reference-python/.venv/
+reference-python/*.egg-info/
+__pycache__/
+*.pyc
+
+# ── OS / editor cruft ───────────────────────────────────────────────────────
+.DS_Store
+*.swp
+.idea/
+.vscode/

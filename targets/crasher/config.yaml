@@ -1,0 +1,11 @@
+detector: dynamic
+language: Python
+description: >
+  A tiny program with a fixed 16-byte buffer. Inputs longer than 16 bytes
+  overflow it and raise an uncaught IndexError (a stand-in for a memory-safety
+  crash). The dynamic detector must craft an input that PROVES the crash by
+  execution, reproduced 2-of-3.
+
+# {input} is the path to cannon's crafted input; {src} is the source root.
+run_command: "python3 {src}/parse.py {input}"
+witness: "output_contains:IndexError"

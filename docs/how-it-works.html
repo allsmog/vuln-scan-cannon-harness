@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cannon — how it works</title>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark', securityLevel: 'loose',
+    sequence: { actorMargin: 60, mirrorActors: false, showSequenceNumbers: true } });
+</script>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+         background: #0b0f14; color: #d7dde3; margin: 0; padding: 2.5rem 3rem 5rem; line-height: 1.5; }
+  h1 { color: #f0a559; margin: 0 0 .25rem; font-size: 1.8rem; }
+  h2 { color: #f0a559; margin: 2.6rem 0 .4rem; font-size: 1.15rem;
+       border-top: 1px solid #1d2735; padding-top: 1.4rem; }
+  p.sub { color: #8b97a6; margin: 0 0 1.5rem; }
+  .card { background: #0f141b; border: 1px solid #1d2735; border-radius: 10px;
+          padding: 1rem 1.2rem; margin: .6rem 0 1.2rem; overflow-x: auto; }
+  .legend { display: flex; flex-wrap: wrap; gap: .5rem 1.4rem; color: #9aa7b6; font-size: .9rem; margin: .4rem 0 0; }
+  .legend b { color: #cdd6e0; }
+  code { background: #16202c; color: #9fd0ff; padding: .08rem .35rem; border-radius: 4px; font-size: .88em; }
+  .tag { color:#f0a559; }
+  footer { color:#5e6b7a; font-size:.82rem; margin-top:3rem; }
+</style>
+</head>
+<body>
+  <h1>cannon — how it works</h1>
+  <p class="sub">An AI security harness: fire many Claude agents at a target from different angles, then accumulate → adversarially verify → manage in a ledger → attack-chain → visualize. The local <code>claude</code> CLI does the reasoning; cannon orchestrates, de-dupes, and tracks the lifecycle.</p>
+
+  <div class="legend">
+    <span><b>You</b> the operator (CLI / cockpit)</span>
+    <span><b>cannon</b> the Rust orchestrator</span>
+    <span><b>claude</b> headless agents (find / verify / threat-model / chain)</span>
+    <span><b>store</b> <code>results/</code> + the per-target ledger</span>
+  </div>
+
+  <h2>① <code>cannon fire</code> — the main pipeline</h2>
+  <div class="card">
+  <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor You
+    participant cannon
+    participant claude as claude (agents)
+    participant store as results/ + ledger
+    You->>cannon: cannon fire canary --threat-model --chain
+    cannon->>cannon: load config.yaml + context/ docs
+    Note over cannon,claude: context docs are injected as EVIDENCE,<br/>never as instructions
+    cannon->>claude: threat-model agent — read code + docs
+    claude-->>cannon: components · trust boundaries · focus areas
+    cannon->>store: THREAT_MODEL.md + threat_model.json
+    loop SALVO  (focus × variant × model × runs, in parallel)
+        cannon->>claude: find agent (scoped, read-only Read/Grep/Glob)
+        claude-->>cannon: &lt;finding&gt; blocks (file, line, severity, evidence)
+        cannon->>store: run_NNN/result.json  (checkpoint, resumable)
+    end
+    cannon->>cannon: accumulate + dedup by signature<br/>(repeats across rounds = corroboration)
+    loop each UNIQUE finding (parallel)
+        cannon->>claude: verify agent — "try to DISPROVE this"
+        claude-->>cannon: REAL / FALSE_POSITIVE + confidence
+    end
+    cannon->>store: merge into ledger → VULN_FINDINGS.md<br/>(human decisions stay sticky)
+    cannon->>claude: chain agent — the CONFIRMED findings
+    claude-->>cannon: &lt;chain&gt; blocks (multi-step attacks)
+    cannon->>store: REPORT.md + chains.json + CHAINS.md
+    cannon-->>You: summary — unique / confirmed / chains
+  </pre>
+  </div>
+
+  <h2>② <code>cannon seed</code> + <code>cannon verify</code> — bring your existing backlog</h2>
+  <div class="card">
+  <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor You
+    participant cannon
+    participant claude as claude (verify agent)
+    participant store as ledger
+    You->>cannon: cannon seed canary scan.sarif results.json
+    cannon->>cannon: parse SARIF / Semgrep / JSON / CSV → findings
+    cannon->>store: merge_seeds — dedup by signature
+    Note over store: a match just adds a source tag<br/>sources: [cannon, sarif:CodeQL] · status = new/imported
+    You->>cannon: cannon verify canary
+    loop each unverified (imported) finding
+        cannon->>claude: verify agent — guilty until proven innocent
+        claude-->>cannon: REAL / FALSE_POSITIVE + reason
+    end
+    cannon->>store: apply verdicts (sticky human decisions preserved)
+    cannon-->>You: N confirmed · M false-positive
+  </pre>
+  </div>
+
+  <h2>③ <code>cannon tui</code> — manage &amp; visualize</h2>
+  <div class="card">
+  <pre class="mermaid">
+sequenceDiagram
+    autonumber
+    actor You
+    participant tui as cannon tui (Ratatui)
+    participant store as ledger + json
+    participant claude as claude
+    You->>tui: cannon tui canary
+    tui->>store: load ledger.json · threat_model.json · chains.json
+    tui-->>You: findings table + NATIVE braille graphs<br/>(threat model in trust-tier columns · chain lanes)
+    You->>tui: c / f / a / x  — triage selected finding
+    tui->>store: update ledger.json + VULN_FINDINGS.md (live)
+    You->>tui: r — regenerate chains over confirmed
+    tui->>claude: chain agent
+    claude-->>tui: chains → redraw
+    You->>tui: g — open rendered graph in browser (big graphs)
+  </pre>
+  </div>
+
+  <h2>The one load-bearing idea</h2>
+  <p class="sub">Any single AI scan is flaky and noisy. cannon's design is two countermeasures: <b>union across a permuted salvo</b> (coverage from variance) and a separate <b class="tag">adversarial verifier</b> whose only job is to disprove findings (precision). Everything else — the ledger, the cockpit, seeding — is lifecycle management around those two.</p>
+
+  <footer>Generated for vuln-scan-cannon-harness · open this file anytime: <code>docs/how-it-works.html</code></footer>
+</body>
+</html>
