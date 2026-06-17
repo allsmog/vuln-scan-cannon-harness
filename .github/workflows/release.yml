@@ -11,8 +11,22 @@ permissions:
   contents: write
 
 jobs:
+  # Create the release ONCE so the per-target build jobs only ever *upload* to an
+  # existing release. (When every matrix job raced to create-or-update the same
+  # release, all but one hit a 404 finalizing it.)
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create or update the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+
   build:
     name: ${{ matrix.target }}
+    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
