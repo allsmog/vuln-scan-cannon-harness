@@ -105,3 +105,34 @@ pub async fn run_chain(
     shas.insert("chain".into(), chain.sha256.clone());
     Ok((chains, shas, agent))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_chain_block_with_steps_and_titles() {
+        let mut titles = BTreeMap::new();
+        titles.insert("app.py:10:1".to_string(), "SQLi".to_string());
+        let block = "<title>SQLi to RCE</title>\
+            <premise>unauthenticated remote attacker</premise>\
+            <severity>critical</severity>\
+            <impact>full host takeover</impact>\
+            <step>[app.py:10:1] | exploit the SQLi to write a webshell</step>\
+            <step>- | pivot from the webshell to a root shell</step>";
+        let c = parse_chain_block(block, &titles).unwrap();
+        assert_eq!(c.title, "SQLi to RCE");
+        assert_eq!(c.severity, "CRITICAL");
+        assert_eq!(c.premise, "unauthenticated remote attacker");
+        assert_eq!(c.steps.len(), 2);
+        assert_eq!(c.steps[0].signature, "app.py:10:1");
+        assert_eq!(c.steps[0].title, "SQLi", "known signatures resolve to their finding title");
+        assert_eq!(c.steps[1].signature, "", "'-' is normalized to an empty signature");
+    }
+
+    #[test]
+    fn chain_block_without_title_is_dropped() {
+        assert!(parse_chain_block("<premise>x</premise><step>a</step>", &BTreeMap::new()).is_none());
+        assert!(parse_chain_block("<title></title>", &BTreeMap::new()).is_none());
+    }
+}

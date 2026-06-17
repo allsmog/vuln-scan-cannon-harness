@@ -99,3 +99,33 @@ pub async fn run_threat_model(
     shas.insert("threat_model".into(), tm.sha256.clone());
     Ok((model_out, shas, agent))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pipe_delimited_components_and_skips_empty() {
+        let t = "<component>Web UI | untrusted | browser-facing endpoint</component>\n\
+                 <component>DB | datastore</component>\n\
+                 <component></component>";
+        let c = parse_components(t);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].name, "Web UI");
+        assert_eq!(c[0].trust, "untrusted");
+        assert_eq!(c[0].description, "browser-facing endpoint");
+        assert_eq!(c[1].trust, "datastore");
+        assert_eq!(c[1].description, "");
+    }
+
+    #[test]
+    fn parses_flows_with_and_without_label() {
+        let t = "<data_flow>Web UI -> DB : user query</data_flow>\n\
+                 <data_flow>DB -> Cache</data_flow>\n\
+                 <data_flow>no arrow here</data_flow>";
+        let f = parse_flows(t);
+        assert_eq!(f.len(), 2, "the arrow-less flow is dropped");
+        assert_eq!((f[0].src.as_str(), f[0].dst.as_str(), f[0].label.as_str()), ("Web UI", "DB", "user query"));
+        assert_eq!((f[1].src.as_str(), f[1].dst.as_str(), f[1].label.as_str()), ("DB", "Cache", ""));
+    }
+}

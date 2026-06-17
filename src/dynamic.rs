@@ -33,16 +33,37 @@ impl WitnessResult {
     }
 }
 
+/// Env-var name substrings that likely carry secrets. Removed from the
+/// environment of exec'd target commands so a (possibly untrusted) target can't
+/// read the operator's credentials out of its own process environment.
+const SECRET_ENV_HINTS: [&str; 13] = [
+    "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "API_KEY", "APIKEY",
+    "PRIVATE_KEY", "AWS_", "GCP_", "AZURE_", "ANTHROPIC", "OPENAI",
+];
+
+/// Strip secret-bearing env vars from `cmd` (keeps PATH/HOME/LANG so builds work).
+fn harden_exec_env(cmd: &mut Command) {
+    for (k, _) in std::env::vars() {
+        let up = k.to_uppercase();
+        if SECRET_ENV_HINTS.iter().any(|h| up.contains(h)) {
+            cmd.env_remove(&k);
+        }
+    }
+}
+
 /// Run `run_command` once with `{input}`/`{src}` substituted; combined output; timeout.
 pub fn run_once(run_command: &str, input_path: &str, src: &str, cwd: &Path, timeout: Duration) -> (Option<i32>, String) {
     let cmd = run_command.replace("{input}", input_path).replace("{src}", src);
-    let mut child = match Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(&cmd)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    harden_exec_env(&mut command);
+    let mut child = match command
         .spawn()
     {
         Ok(c) => c,
@@ -254,6 +275,20 @@ mod tests {
         // a tiny "vulnerable" program: exit 134 (crash-like) iff input contains BOOM
         std::fs::write(dir.join("vuln.sh"), "#!/bin/sh\nif grep -q BOOM \"$1\"; then exit 134; else exit 0; fi\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn secret_env_hints_match_common_secrets() {
+        let secret = ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY", "GITHUB_TOKEN", "DB_PASSWORD", "MY_API_KEY"];
+        for k in secret {
+            let up = k.to_uppercase();
+            assert!(SECRET_ENV_HINTS.iter().any(|h| up.contains(h)), "{k} should be flagged secret");
+        }
+        let safe = ["PATH", "HOME", "LANG", "TMPDIR", "USER", "SHELL"];
+        for k in safe {
+            let up = k.to_uppercase();
+            assert!(!SECRET_ENV_HINTS.iter().any(|h| up.contains(h)), "{k} should NOT be flagged");
+        }
     }
 
     #[test]

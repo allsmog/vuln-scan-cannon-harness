@@ -195,13 +195,18 @@ fn progress_line(msg: &Value, prefix: &str) {
 pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
     // Sanitize the tool set: drop anything on the denylist so a caller (or a
     // future refactor) can never widen the agent into write/exec/network tools.
-    let tools: Vec<String> = opts
+    // If that empties the list, fall back to the read-only default — never to an
+    // empty `--tools` (which the CLI treats as "default = ALL tools available").
+    let mut tools: Vec<String> = opts
         .tools
         .clone()
         .unwrap_or_else(|| READONLY_TOOLS.iter().map(|s| s.to_string()).collect())
         .into_iter()
         .filter(|t| !DENY_TOOLS.iter().any(|d| d.eq_ignore_ascii_case(t)))
         .collect();
+    if tools.is_empty() {
+        tools = READONLY_TOOLS.iter().map(|s| s.to_string()).collect();
+    }
 
     let mut result = AgentResult::default();
     let mut attempt: u32 = 0;
@@ -225,17 +230,12 @@ pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
             .arg(permission_mode())
             .arg("--model")
             .arg(&opts.model);
-        if !tools.is_empty() {
-            cmd.arg("--tools");
-            for t in &tools {
-                cmd.arg(t);
-            }
-        }
+        // IMPORTANT: `--tools`/`--disallowedTools` are variadic (`<tools...>`), so the
+        // space-separated form greedily consumes the trailing prompt argument as tool
+        // names. Use the `--flag=comma,separated` form, which binds exactly one value.
+        cmd.arg(format!("--tools={}", tools.join(",")));
         // Hard denylist: even under bypassPermissions, these tools are refused.
-        cmd.arg("--disallowedTools");
-        for t in DENY_TOOLS {
-            cmd.arg(t);
-        }
+        cmd.arg(format!("--disallowedTools={}", DENY_TOOLS.join(",")));
         for d in &opts.add_dirs {
             cmd.arg("--add-dir").arg(d);
         }
@@ -364,8 +364,15 @@ pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
             ));
         }
 
-        let _ = child.wait().await;
-        let stderr_text = stderr_handle.await.unwrap_or_default();
+        // Bounded cleanup: if the CLI spawned a grandchild that outlives it (or we
+        // just killed it on timeout), the inherited stderr pipe can stay open and
+        // block these awaits indefinitely. Cap the wait so a timeout actually
+        // returns promptly; the detached reader finishes when the pipe finally closes.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+        let stderr_text = match tokio::time::timeout(std::time::Duration::from_secs(3), stderr_handle).await {
+            Ok(Ok(s)) => s,
+            _ => String::new(),
+        };
 
         if got_result && errored.is_none() {
             return result;
