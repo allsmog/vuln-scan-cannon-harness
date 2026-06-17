@@ -1,0 +1,79 @@
+name: Release
+
+# Build prebuilt `cannon` binaries for each platform and attach them to the
+# GitHub Release when a version tag is pushed (e.g. `git tag v0.1.0 && git push --tags`).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      # Cross-linker for the aarch64 Linux target.
+      - name: Install aarch64 linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # Package: tar.gz on Unix, zip on Windows. Bundle the prompts (cannon needs
+      # them at runtime) so the archive is self-contained.
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          dist="cannon-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir "$dist"
+          cp "target/${{ matrix.target }}/release/cannon" "$dist/"
+          cp -r prompts "$dist/"
+          cp README.md LICENSE "$dist/" 2>/dev/null || true
+          tar czf "$dist.tar.gz" "$dist"
+          echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dist = "cannon-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $dist | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/cannon.exe" $dist
+          Copy-Item -Recurse prompts $dist
+          Copy-Item README.md,LICENSE $dist -ErrorAction SilentlyContinue
+          Compress-Archive -Path $dist -DestinationPath "$dist.zip"
+          "ASSET=$dist.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          fail_on_unmatched_files: true

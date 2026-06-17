@@ -1,8 +1,11 @@
 [package]
 name = "cannon"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
 description = "Fire salvos of permuted defending-code scans at a target, then accumulate, triage, attack-chain, and visualize — in a Ratatui cockpit."
+license = "MIT"
+repository = "https://github.com/allsmog/vuln-scan-cannon-harness"
 
 [[bin]]
 name = "cannon"

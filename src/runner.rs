@@ -67,10 +67,18 @@ pub async fn run_salvo(
         if resume && ckpt.is_file() {
             if let Ok(s) = std::fs::read_to_string(&ckpt) {
                 if let Ok(prev) = serde_json::from_str::<RoundResult>(&s) {
-                    if prev.is_terminal() && prev.status != "agent_failed" {
+                    // Only reuse a checkpoint that belongs to THIS target — a
+                    // mismatched dir re-runs rather than accumulating foreign results.
+                    let same_target = prev.target.is_empty() || prev.target == target.name;
+                    if same_target && prev.is_terminal() && prev.status != "agent_failed" {
                         results.insert(spec.round_idx, prev);
                         skipped += 1;
                         continue;
+                    } else if !same_target {
+                        eprintln!(
+                            "{}",
+                            color(&format!("  ⚠ [resume] round {} checkpoint is for target '{}', not '{}' — re-running", spec.round_idx, prev.target, target.name), "dim")
+                        );
                     }
                 }
             }
@@ -98,11 +106,14 @@ pub async fn run_salvo(
             );
             let rr = detector::run_round(&target, &spec, &ctx, &out_dir, Some(format!("  [{}]", spec.label))).await;
 
-            std::fs::create_dir_all(&out_dir).ok();
+            // Persist the round checkpoint atomically. A failure here means
+            // --resume would re-run this round, so surface it rather than hide it.
             if let Ok(j) = serde_json::to_string_pretty(&rr) {
-                let tmp = out_dir.join("result.json.tmp");
-                if std::fs::write(&tmp, &j).is_ok() {
-                    let _ = std::fs::rename(&tmp, out_dir.join("result.json"));
+                if let Err(e) = crate::lock::write_atomic(&out_dir.join("result.json"), j.as_bytes()) {
+                    eprintln!(
+                        "{}",
+                        color(&format!("  ⚠ failed to checkpoint round {} ({e}); --resume will re-run it", spec.round_idx), "red")
+                    );
                 }
             }
 

@@ -36,6 +36,12 @@ impl FileLock {
     /// Acquire an exclusive lock at `path`, spinning until it's free, the stale
     /// timeout breaks an orphaned lock, or [`ACQUIRE_TIMEOUT`] elapses.
     pub fn acquire(path: PathBuf) -> std::io::Result<FileLock> {
+        Self::acquire_with(path, STALE_AFTER, ACQUIRE_TIMEOUT)
+    }
+
+    /// Lower-level acquire with explicit stale/timeout budgets (so tests can use
+    /// millisecond values instead of the two-minute production defaults).
+    fn acquire_with(path: PathBuf, stale_after: Duration, acquire_timeout: Duration) -> std::io::Result<FileLock> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -49,28 +55,28 @@ impl FileLock {
                     return Ok(FileLock { path });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if Self::is_stale(&path) {
+                    if Self::is_stale(&path, stale_after) {
                         // Best-effort break; a racing winner just re-loops.
                         let _ = std::fs::remove_file(&path);
                         continue;
                     }
-                    if start.elapsed() >= ACQUIRE_TIMEOUT {
+                    if start.elapsed() >= acquire_timeout {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!("timed out acquiring lock {}", path.display()),
                         ));
                     }
-                    std::thread::sleep(SPIN);
+                    std::thread::sleep(SPIN.min(acquire_timeout / 4 + Duration::from_millis(1)));
                 }
                 Err(e) => return Err(e),
             }
         }
     }
 
-    fn is_stale(path: &Path) -> bool {
+    fn is_stale(path: &Path, stale_after: Duration) -> bool {
         std::fs::metadata(path)
             .and_then(|m| m.modified())
-            .map(|t| t.elapsed().map(|age| age > STALE_AFTER).unwrap_or(false))
+            .map(|t| t.elapsed().map(|age| age > stale_after).unwrap_or(false))
             .unwrap_or(false)
     }
 }
@@ -78,6 +84,24 @@ impl FileLock {
 impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Write `bytes` to `path` atomically: a unique temp file in the same directory
+/// then `rename` over the destination (atomic on the same filesystem). The temp
+/// name carries the pid so two processes never share a temp path.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let fname = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
+    let tmp = dir.join(format!(".{fname}.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 
@@ -107,6 +131,54 @@ mod tests {
     }
 
     #[test]
+    fn second_acquire_blocks_until_first_released() {
+        use std::sync::mpsc;
+        use std::thread;
+        let dir = tmp("contend");
+        let lp = dir.join(".lock");
+        let held = FileLock::acquire(lp.clone()).unwrap();
+
+        // A second acquirer in another thread must block while we hold it.
+        let (tx, rx) = mpsc::channel();
+        let lp2 = lp.clone();
+        let t = thread::spawn(move || {
+            let l = FileLock::acquire(lp2).unwrap(); // should only succeed after release
+            tx.send(()).unwrap();
+            drop(l);
+        });
+        // Give the contender time to spin; it must NOT have acquired yet.
+        thread::sleep(Duration::from_millis(120));
+        assert!(rx.try_recv().is_err(), "second acquire succeeded while lock was held");
+        // Release; now the contender should acquire promptly.
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5)).expect("contender never acquired after release");
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn acquire_times_out_when_held() {
+        let dir = tmp("timeout");
+        let lp = dir.join(".lock");
+        let _held = FileLock::acquire(lp.clone()).unwrap();
+        // Tiny stale + timeout budgets: a still-fresh held lock should time out.
+        let r = FileLock::acquire_with(lp.clone(), Duration::from_secs(60), Duration::from_millis(150));
+        assert!(r.is_err(), "acquire should time out while the lock is held fresh");
+        assert_eq!(r.err().unwrap().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn stale_lock_is_broken() {
+        let dir = tmp("stale");
+        let lp = dir.join(".lock");
+        let _held = FileLock::acquire(lp.clone()).unwrap();
+        // With a near-zero stale window, the existing lock is "orphaned" and gets
+        // broken, so a contender acquires despite the file existing.
+        std::thread::sleep(Duration::from_millis(20));
+        let got = FileLock::acquire_with(lp.clone(), Duration::from_millis(1), Duration::from_secs(2));
+        assert!(got.is_ok(), "a stale lock must be broken and re-acquired");
+    }
+
+    #[test]
     fn atomic_write_replaces_whole_file() {
         let dir = tmp("atomic");
         let f = dir.join("ledger.json");
@@ -117,23 +189,5 @@ mod tests {
         // No temp turds left behind.
         let leftovers: Vec<_> = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".tmp.")).collect();
         assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
-    }
-}
-
-/// Write `bytes` to `path` atomically: a unique temp file in the same directory
-/// then `rename` over the destination (atomic on the same filesystem). The temp
-/// name carries the pid so two processes never share a temp path.
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    let fname = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "out".into());
-    let tmp = dir.join(format!(".{fname}.tmp.{}", std::process::id()));
-    std::fs::write(&tmp, bytes)?;
-    match std::fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
     }
 }

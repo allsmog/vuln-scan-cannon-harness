@@ -33,3 +33,21 @@ pub fn ecolor(text: &str, name: &str) -> String {
         text.to_string()
     }
 }
+
+/// Open a file/URL in the OS default handler, cross-platform. Best-effort: a
+/// missing opener is not fatal (the caller already wrote the file to disk).
+pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+
+    cmd.arg(path);
+    cmd.spawn().map(|_| ())
+}

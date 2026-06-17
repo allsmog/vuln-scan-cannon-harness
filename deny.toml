@@ -1,0 +1,42 @@
+# cargo-deny configuration — supply-chain gate for a security tool.
+# Run locally with:  cargo deny check
+
+[advisories]
+# Fail on any known security advisory (RUSTSEC) in the dependency tree.
+version = 2
+yanked = "deny"
+ignore = [
+    # `paste` is unmaintained (maintenance advisory, not a vulnerability). It is
+    # pulled in transitively by ratatui 0.29 with no safe upgrade available
+    # upstream yet. Revisit when ratatui drops it.
+    "RUSTSEC-2024-0436",
+]
+
+[bans]
+# Catch duplicate versions and accidental heavy/duplicate deps.
+multiple-versions = "warn"
+wildcards = "warn"
+deny = []
+
+[licenses]
+version = 2
+# Permissive licenses we accept for dependencies. cannon itself is MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -114,14 +114,41 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Join `rel` under `base`, refusing absolute paths, drive prefixes, and any
+/// `..` traversal. `rel_file` is ultimately LLM-derived (steerable by target
+/// content), so an un-contained join (`dst.join("../../etc/passwd")`) would be an
+/// arbitrary read+rewrite primitive once exec is enabled.
+fn safe_join(base: &Path, rel: &str) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let relp = Path::new(rel);
+    for comp in relp.components() {
+        match comp {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("refusing unsafe mutation_file path '{rel}'"),
+                ))
+            }
+        }
+    }
+    Ok(base.join(relp))
+}
+
+/// Sanitize a tag for use as a single path segment (temp dir name).
+fn safe_tag(tag: &str) -> String {
+    let s: String = tag.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    if s.is_empty() { "x".into() } else { s.chars().take(64).collect() }
+}
+
 /// Copy `src_root` into a fresh temp dir, then apply a literal `find`→`replace` in
 /// `rel_file`. Returns the temp root (caller cleans it up). The mutation is the
 /// agent's "what would make this vulnerable" change; we materialize it to run it.
 pub fn stage_mutation(src_root: &Path, rel_file: &str, find: &str, replace: &str, tag: &str) -> std::io::Result<PathBuf> {
-    let dst = std::env::temp_dir().join(format!("cannon_meta_{tag}"));
+    let dst = std::env::temp_dir().join(format!("cannon_meta_{}", safe_tag(tag)));
     let _ = std::fs::remove_dir_all(&dst);
     copy_tree(src_root, &dst)?;
-    let f = dst.join(rel_file);
+    let f = safe_join(&dst, rel_file)?;
     let original = std::fs::read_to_string(&f)?;
     if !find.is_empty() && original.contains(find) {
         std::fs::write(&f, original.replacen(find, replace, 1))?;
@@ -164,6 +191,38 @@ mod tests {
         assert_eq!(std::fs::read_to_string(mutant.join("sub/other.py")).unwrap(), "untouched\n");
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&mutant);
+    }
+
+    #[test]
+    fn safe_join_blocks_traversal_and_absolute() {
+        let base = Path::new("/tmp/cannon_base");
+        // Legitimate relative paths are allowed.
+        assert!(safe_join(base, "app.py").is_ok());
+        assert!(safe_join(base, "sub/other.py").is_ok());
+        assert!(safe_join(base, "./a.py").is_ok());
+        // Traversal and absolute escapes are refused.
+        assert!(safe_join(base, "../../etc/passwd").is_err());
+        assert!(safe_join(base, "sub/../../escape").is_err());
+        assert!(safe_join(base, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn stage_mutation_refuses_traversal_rel_file() {
+        let src = std::env::temp_dir().join("cannon_meta_trav_test");
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.py"), "x\n").unwrap();
+        let err = stage_mutation(&src, "../../../../../../etc/hosts", "x", "y", "trav");
+        assert!(err.is_err(), "traversal rel_file must be refused");
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    #[test]
+    fn safe_tag_strips_path_separators() {
+        assert_eq!(safe_tag("F-001"), "F-001");
+        assert_eq!(safe_tag("../../evil"), "______evil");
+        assert!(!safe_tag("a/b/c").contains('/'));
+        assert_eq!(safe_tag(""), "x");
     }
 
     #[test]
