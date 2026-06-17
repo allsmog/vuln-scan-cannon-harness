@@ -520,9 +520,10 @@ async fn cmd_fire(
     let mut threat_model: Option<ThreatModel> = None;
     let (results_dir, specs): (PathBuf, Vec<Spec>) = if let Some(rd) = resume {
         let rd = PathBuf::from(rd);
-        let manifest = std::fs::read_to_string(rd.join("salvo.json")).context("reading salvo.json for --resume")?;
-        let specs: Vec<Spec> = serde_json::from_str(&manifest)?;
-        (rd, specs)
+        let raw = std::fs::read_to_string(rd.join("salvo.json")).context("reading salvo.json for --resume")?;
+        let manifest = permute::SalvoManifest::parse(&raw).context("parsing salvo.json for --resume")?;
+        manifest.check_resumable(&target.name)?;
+        (rd, manifest.specs)
     } else {
         let results_dir = new_results_dir(&target.name)?;
         let mut focus_areas: Vec<String> = if do_threat_model {
@@ -561,7 +562,8 @@ async fn cmd_fire(
         }
 
         let specs = build_matrix(&focus_areas, &variants, &models, runs);
-        std::fs::write(results_dir.join("salvo.json"), serde_json::to_string_pretty(&specs)?)?;
+        let manifest = permute::SalvoManifest::new(&target.name, specs.clone());
+        lock::write_atomic(&results_dir.join("salvo.json"), serde_json::to_string_pretty(&manifest)?.as_bytes())?;
         (results_dir, specs)
     };
 
@@ -950,7 +952,7 @@ async fn cmd_queue(sub: QueueCmd) -> Result<()> {
             println!("{}", color(&budget_line(&q), "dim"));
             let summary = q.counts().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("  ");
             println!("{}", color(&format!("  {summary}"), "dim"));
-            println!("{:<7} {:<10} {:<18} {:>7} {:>5}  {}", "ID", "STATUS", "SOURCE", "EST$", "YIELD", "TITLE");
+            println!("{:<7} {:<10} {:<18} {:>7} {:>5}  TITLE", "ID", "STATUS", "SOURCE", "EST$", "YIELD");
             let mut v: Vec<&queue::Proposal> = q.proposals.iter().collect();
             v.sort_by(|a, b| b.yield_score.partial_cmp(&a.yield_score).unwrap_or(std::cmp::Ordering::Equal));
             for p in v {
@@ -1003,7 +1005,7 @@ async fn cmd_patch(target_name: String, model: String, scope: String, concurrenc
     let target = TargetConfig::load(&target_name, &targets_root())?;
     let led = Ledger::load(&target.target_dir, &target.name);
     let mut selected: Vec<&ledger::LedgerFinding> = led.chainable(&scope);
-    selected.sort_by(|a, b| artifacts::sev_rank(&b.severity).cmp(&artifacts::sev_rank(&a.severity)));
+    selected.sort_by_key(|f| std::cmp::Reverse(artifacts::sev_rank(&f.severity)));
     if top > 0 {
         selected.truncate(top);
     }
@@ -1234,7 +1236,10 @@ async fn score_targets(
 ) -> (bench::BenchScore, Vec<(String, bench::BenchScore)>) {
     let sem = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut set: JoinSet<Option<(String, bench::BenchScore)>> = JoinSet::new();
-    for tdir in targets.to_vec() {
+    // `tdir` is captured by the `async move` task below, so it must be owned
+    // (the clone is required for the spawned future's 'static bound).
+    #[allow(clippy::unnecessary_to_owned)]
+    for tdir in targets.iter().cloned() {
         let sem = sem.clone();
         let model = model.to_string();
         let variant = variant.to_string();
@@ -1243,7 +1248,7 @@ async fn score_targets(
             let target = TargetConfig::load(&tdir.display().to_string(), "").ok()?;
             let labels: Vec<bench::Label> = serde_json::from_str(&std::fs::read_to_string(tdir.join("labels.json")).ok()?).ok()?;
             let (ctx, _) = load_full_context(&target.context_dir(), &target.source_root);
-            let specs = build_matrix(&target.focus_areas, &[variant.clone()], &[model.clone()], 1);
+            let specs = build_matrix(&target.focus_areas, std::slice::from_ref(&variant), std::slice::from_ref(&model), 1);
             let results_dir = new_results_dir(&format!("bench-{}", target.name)).ok()?;
             let rounds = runner::run_salvo(&target, &specs, &results_dir, &ctx, 1, false).await;
             let accumulated = accumulate(&rounds);
@@ -1517,7 +1522,7 @@ async fn cmd_fleet(fleet_path: String, model: String, concurrency: usize, votes:
         let target = TargetConfig::load(t, &targets_root())?;
         println!("{}", color(&format!("  ◆ scanning {}", target.name), "cannon"));
         let (ctx, _) = load_full_context(&target.context_dir(), &target.source_root);
-        let specs = build_matrix(&target.focus_areas, &["default".to_string()], &[model.clone()], 1);
+        let specs = build_matrix(&target.focus_areas, &["default".to_string()], std::slice::from_ref(&model), 1);
         let rd = new_results_dir(&format!("fleet-{}", target.name))?;
         let rounds = runner::run_salvo(&target, &specs, &rd, &ctx, concurrency, false).await;
         let acc = accumulate(&rounds);
@@ -1590,7 +1595,7 @@ fn cmd_findings(sub: FindingsCmd) -> Result<()> {
                 println!("No findings yet. Run `cannon fire {target}` first.");
                 return Ok(());
             }
-            println!("{:<7} {:<9} {:<15} {:<8} {}", "ID", "SEV", "STATUS", "BY", "FINDING");
+            println!("{:<7} {:<9} {:<15} {:<8} FINDING", "ID", "SEV", "STATUS", "BY");
             let mut v: Vec<&ledger::LedgerFinding> = led.findings.iter().collect();
             v.sort_by(|a, b| artifacts::sev_rank(&b.severity).cmp(&artifacts::sev_rank(&a.severity)).then(a.id.cmp(&b.id)));
             for f in v {

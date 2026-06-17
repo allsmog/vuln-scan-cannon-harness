@@ -46,6 +46,19 @@ fn strip_fence(s: &str) -> String {
     t.to_string()
 }
 
+/// A non-fatal patch failure (e.g. a missing prompt template): surfaced in the
+/// output rather than panicking the whole `cannon patch` run.
+fn patch_err(cand: &PatchCandidate, diff: String, msg: String) -> PatchResult {
+    PatchResult {
+        id: cand.id.clone(),
+        file: cand.file.clone(),
+        diff,
+        rationale: String::new(),
+        review: "error".into(),
+        review_notes: msg,
+    }
+}
+
 pub async fn run_patch_one(
     target: &TargetConfig,
     cand: &PatchCandidate,
@@ -53,7 +66,10 @@ pub async fn run_patch_one(
     out_dir: &Path,
     progress_prefix: Option<String>,
 ) -> PatchResult {
-    let sys = build_system_prompt(target, "default").expect("system prompt");
+    let sys = match build_system_prompt(target, "default") {
+        Ok(s) => s,
+        Err(e) => return patch_err(cand, String::new(), format!("system prompt: {e}")),
+    };
     let line_s = cand.line.map(|l| l.to_string()).unwrap_or_else(|| "unknown".into());
     let cwe_s = cand.cwe.clone().unwrap_or_else(|| "unspecified".into());
 
@@ -65,7 +81,10 @@ pub async fn run_patch_one(
     vars.insert("line".into(), line_s.clone());
     vars.insert("cwe".into(), cwe_s.clone());
     vars.insert("description".into(), cand.description.clone());
-    let patch_prompt = load_prompt("patch", Some(&target.target_dir), "default", &vars).expect("patch prompt");
+    let patch_prompt = match load_prompt("patch", Some(&target.target_dir), "default", &vars) {
+        Ok(p) => p,
+        Err(e) => return patch_err(cand, String::new(), format!("patch prompt: {e}")),
+    };
 
     let mut opts = AgentOpts::new(model);
     opts.cwd = Some(target.source_root.clone());
@@ -95,7 +114,11 @@ pub async fn run_patch_one(
     rvars.insert("line".into(), line_s);
     rvars.insert("cwe".into(), cwe_s);
     rvars.insert("diff".into(), diff.clone());
-    let review_prompt = load_prompt("patch_review", Some(&target.target_dir), "default", &rvars).expect("patch_review prompt");
+    let review_prompt = match load_prompt("patch_review", Some(&target.target_dir), "default", &rvars) {
+        Ok(p) => p,
+        // Keep the generated diff; just flag that review couldn't run.
+        Err(e) => return patch_err(cand, diff, format!("patch_review prompt: {e}")),
+    };
     let mut ropts = AgentOpts::new(model);
     ropts.cwd = Some(target.source_root.clone());
     ropts.system_prompt = Some(sys.text.clone());

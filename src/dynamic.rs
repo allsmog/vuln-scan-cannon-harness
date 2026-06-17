@@ -142,6 +142,21 @@ pub async fn run_round(target: &TargetConfig, spec: &Spec, out_dir: &Path, progr
     let witness = target.witness.clone().unwrap_or_else(|| "crash".into());
     let src = target.source_root.display().to_string();
 
+    // Make the authorized commands visible: they come from the target's
+    // config.yaml and run via `sh -c`. The operator opted in with CANNON_ALLOW_EXEC.
+    eprintln!(
+        "{}",
+        crate::ui::ecolor(
+            &format!(
+                "  ⚠ exec enabled — running target commands from config.yaml under {}:\n      build: {}\n      run:   {}",
+                target.source_root.display(),
+                target.build_command.as_deref().unwrap_or("(none)"),
+                run_command
+            ),
+            "dim"
+        )
+    );
+
     // Build once (if configured).
     if let Some(bc) = &target.build_command {
         let (exit, out) = run_once(bc, "", &src, &target.source_root, Duration::from_secs(1800));
@@ -230,6 +245,8 @@ pub async fn run_round(target: &TargetConfig, spec: &Spec, out_dir: &Path, progr
 mod tests {
     use super::*;
 
+    // These exercise the real exec path through `sh`, so they only run on Unix.
+    #[cfg(unix)]
     fn temp_target(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("cannon_dyn_test_{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -251,6 +268,7 @@ mod tests {
         assert!(!check_witness(Some(0), "fine", "output_contains:AddressSanitizer"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn reproduce_proven_on_crashing_input() {
         let dir = temp_target("proven");
@@ -261,6 +279,7 @@ mod tests {
         assert!(res.proven());
     }
 
+    #[cfg(unix)]
     #[test]
     fn reproduce_not_proven_on_safe_input() {
         let dir = temp_target("safe");
@@ -271,6 +290,7 @@ mod tests {
         assert!(!res.proven());
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_is_enforced() {
         let dir = temp_target("timeout");
@@ -281,6 +301,7 @@ mod tests {
         assert!(out.contains("timeout"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn absolute_input_path_resolves_under_foreign_cwd() {
         // Regression: the PoC path must be absolute, because the target runs with

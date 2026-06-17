@@ -15,6 +15,39 @@ use tokio::process::Command;
 
 pub const READONLY_TOOLS: [&str; 3] = ["Read", "Grep", "Glob"];
 
+/// Tools that must never run while scanning untrusted code. Passed to the CLI as
+/// an explicit `--disallowedTools` denylist (defense-in-depth alongside the
+/// read-only allowlist) and used to sanitize any caller-supplied tool set, so a
+/// prompt-injection payload in the target can't escalate to writes/exec/network.
+pub const DENY_TOOLS: [&str; 8] =
+    ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "Task", "WebFetch", "WebSearch"];
+
+/// The CLI binary to drive. Overridable via `CANNON_CLAUDE_BIN` so tests can
+/// substitute a stub and operators can pin a specific install.
+pub fn claude_bin() -> String {
+    std::env::var("CANNON_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string())
+}
+
+/// Per-attempt wall-clock budget for a single `claude` invocation. A hung CLI or
+/// stalled model would otherwise block a salvo slot forever. Override with
+/// `CANNON_AGENT_TIMEOUT_SECS` (0 disables).
+fn agent_timeout() -> Option<std::time::Duration> {
+    let secs = std::env::var("CANNON_AGENT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(600);
+    if secs == 0 { None } else { Some(std::time::Duration::from_secs(secs)) }
+}
+
+/// Permission mode for the headless CLI. Defaults to `bypassPermissions` (the
+/// only mode that runs pre-approved read tools without an interactive prompt in
+/// `-p` mode); the [`DENY_TOOLS`] denylist is the hard backstop. Operators on a
+/// CLI build with stricter non-interactive semantics can set
+/// `CANNON_PERMISSION_MODE` (e.g. `default`).
+fn permission_mode() -> String {
+    std::env::var("CANNON_PERMISSION_MODE").unwrap_or_else(|_| "bypassPermissions".to_string())
+}
+
 // Process-wide cost/token accounting, summed from each agent's `result` message.
 use std::sync::atomic::{AtomicU64, Ordering};
 static TOTAL_COST_MICRO: AtomicU64 = AtomicU64::new(0);
@@ -160,26 +193,36 @@ fn progress_line(msg: &Value, prefix: &str) {
 }
 
 pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
+    // Sanitize the tool set: drop anything on the denylist so a caller (or a
+    // future refactor) can never widen the agent into write/exec/network tools.
     let tools: Vec<String> = opts
         .tools
         .clone()
-        .unwrap_or_else(|| READONLY_TOOLS.iter().map(|s| s.to_string()).collect());
+        .unwrap_or_else(|| READONLY_TOOLS.iter().map(|s| s.to_string()).collect())
+        .into_iter()
+        .filter(|t| !DENY_TOOLS.iter().any(|d| d.eq_ignore_ascii_case(t)))
+        .collect();
 
     let mut result = AgentResult::default();
     let mut attempt: u32 = 0;
+    // Transcripts capture the model reading raw source and can contain cleartext
+    // secrets present in the target. They live under .cannon/ (gitignored), but
+    // sensitive runs can suppress them entirely with CANNON_NO_TRANSCRIPTS=1.
+    let transcripts_disabled = std::env::var("CANNON_NO_TRANSCRIPTS").ok().as_deref() == Some("1");
     let mut transcript = opts
         .transcript_path
         .as_ref()
+        .filter(|_| !transcripts_disabled)
         .and_then(|p| std::fs::File::create(p).ok());
 
     loop {
-        let mut cmd = Command::new("claude");
+        let mut cmd = Command::new(claude_bin());
         cmd.arg("-p")
             .arg("--verbose")
             .arg("--output-format")
             .arg("stream-json")
             .arg("--permission-mode")
-            .arg("bypassPermissions")
+            .arg(permission_mode())
             .arg("--model")
             .arg(&opts.model);
         if !tools.is_empty() {
@@ -188,16 +231,24 @@ pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
                 cmd.arg(t);
             }
         }
+        // Hard denylist: even under bypassPermissions, these tools are refused.
+        cmd.arg("--disallowedTools");
+        for t in DENY_TOOLS {
+            cmd.arg(t);
+        }
         for d in &opts.add_dirs {
             cmd.arg("--add-dir").arg(d);
         }
         if let Some(sp) = &opts.system_prompt {
             cmd.arg("--append-system-prompt").arg(sp);
         }
-        if attempt > 0 && result.session_id.is_some() {
-            cmd.arg("--resume").arg(result.session_id.as_ref().unwrap()).arg("continue");
-        } else {
-            cmd.arg(prompt);
+        match result.session_id.as_ref().filter(|_| attempt > 0) {
+            Some(sid) => {
+                cmd.arg("--resume").arg(sid).arg("continue");
+            }
+            None => {
+                cmd.arg(prompt);
+            }
         }
         if let Some(cwd) = &opts.cwd {
             cmd.current_dir(cwd);
@@ -208,12 +259,20 @@ pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                result.error = Some(format!("spawn failed: {e}"));
+                result.error = Some(format!("spawn failed (is `{}` installed and on PATH?): {e}", claude_bin()));
                 return result;
             }
         };
 
-        let stdout = child.stdout.take().unwrap();
+        // stdout is always piped above; guard anyway rather than unwrap-panic.
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let _ = child.start_kill();
+                result.error = Some("claude stdout was not captured".to_string());
+                return result;
+            }
+        };
         let mut stderr = child.stderr.take();
         let stderr_handle = tokio::spawn(async move {
             let mut buf = String::new();
@@ -227,60 +286,82 @@ pub async fn run_agent(prompt: &str, opts: &AgentOpts) -> AgentResult {
         let mut got_result = false;
         let mut errored: Option<String> = None;
 
-        loop {
-            match lines.next_line().await {
-                Ok(Some(line)) => {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let msg: Value = match serde_json::from_str(line) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    if let Some(f) = transcript.as_mut() {
-                        let _ = writeln!(f, "{line}");
-                    }
-                    if let Some(prefix) = &opts.progress_prefix {
-                        progress_line(&msg, prefix);
-                    }
-                    let mtype = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    if mtype == "system"
-                        && msg.get("subtype").and_then(|t| t.as_str()) == Some("init")
-                    {
-                        if result.session_id.is_none() {
-                            if let Some(sid) = msg.get("session_id").and_then(|s| s.as_str()) {
-                                result.session_id = Some(sid.to_string());
-                            }
+        // Read the stream under a wall-clock budget; a hung CLI is killed and the
+        // attempt falls through to the retry/backoff path below.
+        let stream = async {
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
                         }
-                        result.messages.push(msg);
-                    } else if mtype == "result" {
-                        if let Some(c) = msg.get("total_cost_usd").and_then(|v| v.as_f64()) {
-                            TOTAL_COST_MICRO.fetch_add((c * 1_000_000.0) as u64, Ordering::Relaxed);
+                        let msg: Value = match serde_json::from_str(line) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        if let Some(f) = transcript.as_mut() {
+                            let _ = writeln!(f, "{line}");
                         }
-                        if let Some(u) = msg.get("usage") {
-                            if let Some(i) = u.get("input_tokens").and_then(|v| v.as_u64()) {
-                                TOTAL_IN.fetch_add(i, Ordering::Relaxed);
-                            }
-                            if let Some(o) = u.get("output_tokens").and_then(|v| v.as_u64()) {
-                                TOTAL_OUT.fetch_add(o, Ordering::Relaxed);
-                            }
+                        if let Some(prefix) = &opts.progress_prefix {
+                            progress_line(&msg, prefix);
                         }
-                        let is_err = msg.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
-                        result.messages.push(msg);
-                        if is_err {
-                            errored = Some("CLI result is_error".to_string());
+                        let mtype = msg.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if mtype == "system"
+                            && msg.get("subtype").and_then(|t| t.as_str()) == Some("init")
+                        {
+                            if result.session_id.is_none() {
+                                if let Some(sid) = msg.get("session_id").and_then(|s| s.as_str()) {
+                                    result.session_id = Some(sid.to_string());
+                                }
+                            }
+                            result.messages.push(msg);
+                        } else if mtype == "result" {
+                            if let Some(c) = msg.get("total_cost_usd").and_then(|v| v.as_f64()) {
+                                // Guard against NaN/negative from a malformed CLI line.
+                                if c.is_finite() && c > 0.0 {
+                                    TOTAL_COST_MICRO.fetch_add((c * 1_000_000.0) as u64, Ordering::Relaxed);
+                                }
+                            }
+                            if let Some(u) = msg.get("usage") {
+                                if let Some(i) = u.get("input_tokens").and_then(|v| v.as_u64()) {
+                                    TOTAL_IN.fetch_add(i, Ordering::Relaxed);
+                                }
+                                if let Some(o) = u.get("output_tokens").and_then(|v| v.as_u64()) {
+                                    TOTAL_OUT.fetch_add(o, Ordering::Relaxed);
+                                }
+                            }
+                            let is_err = msg.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
+                            result.messages.push(msg);
+                            if is_err {
+                                errored = Some("CLI result is_error".to_string());
+                            } else {
+                                got_result = true;
+                            }
+                            break;
                         } else {
-                            got_result = true;
+                            result.messages.push(msg);
                         }
-                        break;
-                    } else {
-                        result.messages.push(msg);
                     }
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
-                Ok(None) => break,
-                Err(_) => break,
             }
+        };
+
+        let timed_out = match agent_timeout() {
+            Some(dur) => tokio::time::timeout(dur, stream).await.is_err(),
+            None => {
+                stream.await;
+                false
+            }
+        };
+        if timed_out {
+            let _ = child.start_kill();
+            errored = Some(format!(
+                "timed out after {}s (set CANNON_AGENT_TIMEOUT_SECS to adjust)",
+                agent_timeout().map(|d| d.as_secs()).unwrap_or(0)
+            ));
         }
 
         let _ = child.wait().await;

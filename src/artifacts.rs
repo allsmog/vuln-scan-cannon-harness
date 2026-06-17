@@ -383,9 +383,7 @@ pub fn derive_severity(access: Option<&str>, preconditions: usize, claimed: &str
         3
     } else if a.contains("auth") {
         2
-    } else if a.contains("local") {
-        1
-    } else if a.contains("phys") {
+    } else if a.contains("local") || a.contains("phys") {
         1
     } else {
         return norm_severity(claimed);

@@ -171,7 +171,7 @@ impl App {
         let html = build_html(&self.target.name, &strip_fence(&tmm), &strip_fence(&chm));
         let path = self.target.target_dir.join("dashboard.html");
         crate::lock::write_atomic(&path, html.as_bytes())?;
-        let _ = std::process::Command::new("open").arg(&path).spawn();
+        let _ = crate::ui::open_path(&path);
         self.status = format!("opened {}", path.display());
         Ok(())
     }

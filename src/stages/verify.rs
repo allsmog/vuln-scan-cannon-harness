@@ -90,9 +90,9 @@ async fn run_one_vote(
     graph: Option<&crate::repomap::RepoGraph>,
     transcript_path: Option<PathBuf>,
     progress_prefix: Option<String>,
-) -> (Vote, BTreeMap<String, String>, AgentResult) {
+) -> anyhow::Result<(Vote, BTreeMap<String, String>, AgentResult)> {
     let f = &acc.representative;
-    let sys = build_system_prompt(target, "default").expect("system prompt");
+    let sys = build_system_prompt(target, "default")?;
     let (lens_name, lens_text) = VERIFY_LENSES[lens_idx % VERIFY_LENSES.len()];
 
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
@@ -121,7 +121,7 @@ async fn run_one_vote(
         "known_false_positives".into(),
         if calib.is_empty() { "(no prior false positives recorded for this repository)".into() } else { calib.to_string() },
     );
-    let verify = load_prompt("verify", Some(&target.target_dir), "default", &vars).expect("verify prompt");
+    let verify = load_prompt("verify", Some(&target.target_dir), "default", &vars)?;
 
     let mut opts = AgentOpts::new(model);
     opts.cwd = Some(target.source_root.clone());
@@ -154,7 +154,7 @@ async fn run_one_vote(
     let mut shas = BTreeMap::new();
     shas.insert("system".into(), sys.sha256.clone());
     shas.insert("verify".into(), verify.sha256.clone());
-    (vote, shas, agent)
+    Ok((vote, shas, agent))
 }
 
 pub async fn run_verify(
@@ -177,7 +177,7 @@ pub async fn run_verify(
     // Sequential within a finding (findings are already verified in parallel upstream).
     for i in 0..n {
         let tp = verify_dir.as_ref().map(|d| d.join(format!("{}.v{i}.jsonl", safe_sig(&acc.signature))));
-        let (vote, s, agent) = run_one_vote(target, acc, model, i, &calib, graph.as_ref(), tp, progress_prefix.clone()).await;
+        let (vote, s, agent) = run_one_vote(target, acc, model, i, &calib, graph.as_ref(), tp, progress_prefix.clone()).await?;
         shas = s;
         last_agent = agent;
         cast.push(vote);

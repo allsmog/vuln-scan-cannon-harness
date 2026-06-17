@@ -316,7 +316,9 @@ mod tests {
     #[test]
     fn rounds_match_the_matrix_cardinality() {
         let s = ProposalSpec { focus_areas: vec!["a".into(), "b".into()], variants: vec!["x".into(), "y".into()], models: vec!["m".into()], runs: 3, verify: false, votes: 0 };
-        assert_eq!(s.rounds(), 2 * 2 * 1 * 3);
+        // focus(2) × variant(2) × model(1) × runs(3)
+        let (focus, variant, model, runs) = (2, 2, 1, 3);
+        assert_eq!(s.rounds(), focus * variant * model * runs);
         assert_eq!(spec(&[], 1, false).rounds(), 1); // empty focus still ≥1
     }
 

@@ -4,6 +4,7 @@
 //!   1. <target>/prompt_overrides/<name>.md
 //!   2. <prompts>/variants/<variant>/<name>.md
 //!   3. <prompts>/<name>.md
+//!
 //! sha256 is over the RAW template (the version id), independent of interpolation.
 
 use anyhow::{bail, Result};

@@ -5,9 +5,12 @@
 [![Release](https://img.shields.io/github/v/release/allsmog/vuln-scan-cannon-harness)](https://github.com/allsmog/vuln-scan-cannon-harness/releases)
 ![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 
-> **AI-native SAST in a single Rust binary** — agentic interprocedural taint resolution, a trust-graph reachability oracle, and metamorphic verification (**benchmarked head-to-head with [Semgrep](BENCHMARK.md)**), plus a human-gated, cost-estimated **[permutation planner](PERMUTATION.md)** with *incomplete-fix variant hunting*. An LLM security scanner that runs on your local Claude CLI — **your code never leaves your machine.**
+> **AI-native SAST in a single Rust binary** — a *reasoning* layer that complements pattern scanners: agentic interprocedural taint resolution, a trust-graph reachability oracle, and metamorphic verification (**[benchmarked against Semgrep](BENCHMARK.md)** — roughly at parity on raw detection; the edge is reasoning over context and rejecting false positives), plus a human-gated, cost-estimated **[permutation planner](PERMUTATION.md)** with *incomplete-fix variant hunting*. An LLM security scanner that runs on your local Claude CLI — **your code never leaves your machine.**
 >
-> <sub>repo: `vuln-scan-cannon-harness` · keywords: AI SAST · LLM security scanner · Semgrep alternative · variant analysis · DevSecOps · AppSec</sub>
+> <sub>repo: `vuln-scan-cannon-harness` · keywords: AI SAST · LLM security scanner · semantic SAST · Semgrep complement · variant analysis · DevSecOps · AppSec</sub>
+
+> [!IMPORTANT]
+> **What to expect.** cannon is LLM-driven, so it is **non-deterministic** — the same scan can surface different findings run-to-run (that's what `--runs`/`--variants` and the adversarial verifier are for: sample and corroborate). Each run **spends tokens and takes seconds-to-minutes per file** via your local `claude` CLI; every run prints its `$cost`. Treat auto-triage (`triaged_by: auto`) as advice and apply human review before acting — especially on code you don't control (see [SECURITY.md](SECURITY.md)).
 
 Fire **salvos of permuted "defending-code" scans** at a single target, then
 **accumulate → triage → attack-chain → visualize** — managed through a persistent
@@ -34,12 +37,26 @@ feed context → threat-model → CANNON (salvo of permuted scans) → accumulat
 
 **Docs:** [The permutation planner](PERMUTATION.md) · [Benchmark vs Semgrep](BENCHMARK.md) · [How it works (sequence diagram)](docs/how-it-works.html)
 
+## Prerequisites
+
+cannon does not call any API itself — it drives the **[Claude Code](https://docs.claude.com/en/docs/claude-code) `claude` CLI** on your machine. Before using cannon you need:
+
+1. **Install the `claude` CLI** (Claude Code) and make sure it's on your `PATH`.
+2. **Authenticate it once:** run `claude` (or `claude /login`) and sign in. cannon reuses that session — **no API key is set in cannon.**
+3. **Verify it works:** `claude -p "say hi"` should print a reply. If that works, cannon works.
+4. A recent **Rust toolchain** (≥ 1.88) to build the binary.
+
+> If `claude` isn't installed/authenticated, cannon fails fast with `spawn failed (is `claude` installed and on PATH?)`. Point cannon at a specific binary with `CANNON_CLAUDE_BIN=/path/to/claude`.
+
 ## Install
 
 ```bash
 cargo build --release          # → target/release/cannon  (one binary, no runtime deps)
-# Uses your already-authenticated local `claude` CLI — no API key needed.
+# cannon reads its prompts from ./prompts (or $CANNON_PROMPTS); run from the repo
+# root, or set CANNON_PROMPTS to the bundled prompts dir.
 ```
+
+Prebuilt binaries for Linux/macOS/Windows are attached to each [GitHub Release](https://github.com/allsmog/vuln-scan-cannon-harness/releases) (extract and run; the `prompts/` dir is bundled alongside).
 
 (Build the Python prototype under `reference-python/` only if you want the original; the Rust binary is the product.)
 
@@ -149,7 +166,7 @@ The benchmark showed raw detection is ~parity with Semgrep; cannon's edge is *se
 ### Other verification machinery
 
 - **Semantic dedup** (`--dedup`): an LLM judge collapses cross-location duplicates the signature pass missed.
-- **SARIF out**: every run writes `report.sarif`; the ledger writes `findings.sarif` — upload to GitHub code scanning.
+- **SARIF out**: every run writes `report.sarif`; the ledger writes `findings.sarif` — standard SARIF you can wire into GitHub code scanning yourself (add a `github/codeql-action/upload-sarif` step to your workflow). cannon doesn't ship that workflow for you.
 - **Diff mode** (`--diff <ref>`): scope a salvo to files changed since a git ref (PR review).
 - **Cost line**: each run prints `$cost (in/out tokens)`.
 - **Git-history context**: recent commits are fed to the agents as evidence.
@@ -163,12 +180,12 @@ first" move:
 
 ```bash
 cannon seed canary scan.sarif results.json findings.csv   # auto-detects format
-cannon verify canary                                       # triage the imported (unverified) findings
+cannon triage canary                                       # triage the imported (unverified) findings
 ```
 
 Seeded findings enter as `new` / `triaged_by: imported`, deduped by signature
 against what cannon already found (a match just adds the source tag, e.g.
-`sources: [cannon, sarif:CodeQL]`). `cannon verify` then runs the same
+`sources: [cannon, sarif:CodeQL]`). `cannon triage` then runs the same
 guilty-until-proven verifier over them and flips each to `confirmed` or
 `false_positive`. Formats: **SARIF** (CodeQL/Semgrep/most tools), **Semgrep JSON**,
 a **generic findings array**, and **CSV**.

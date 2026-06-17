@@ -70,7 +70,7 @@ sequenceDiagram
   </pre>
   </div>
 
-  <h2>② <code>cannon seed</code> + <code>cannon verify</code> — bring your existing backlog</h2>
+  <h2>② <code>cannon seed</code> + <code>cannon triage</code> — bring your existing backlog</h2>
   <div class="card">
   <pre class="mermaid">
 sequenceDiagram
@@ -83,7 +83,7 @@ sequenceDiagram
     cannon->>cannon: parse SARIF / Semgrep / JSON / CSV → findings
     cannon->>store: merge_seeds — dedup by signature
     Note over store: a match just adds a source tag<br/>sources: [cannon, sarif:CodeQL] · status = new/imported
-    You->>cannon: cannon verify canary
+    You->>cannon: cannon triage canary
     loop each unverified (imported) finding
         cannon->>claude: verify agent — guilty until proven innocent
         claude-->>cannon: REAL / FALSE_POSITIVE + reason
@@ -93,16 +93,16 @@ sequenceDiagram
   </pre>
   </div>
 
-  <h2>③ <code>cannon tui</code> — manage &amp; visualize</h2>
+  <h2>③ <code>cannon manage</code> — manage &amp; visualize</h2>
   <div class="card">
   <pre class="mermaid">
 sequenceDiagram
     autonumber
     actor You
-    participant tui as cannon tui (Ratatui)
+    participant tui as cannon manage (Ratatui)
     participant store as ledger + json
     participant claude as claude
-    You->>tui: cannon tui canary
+    You->>tui: cannon manage canary
     tui->>store: load ledger.json · threat_model.json · chains.json
     tui-->>You: findings table + NATIVE braille graphs<br/>(threat model in trust-tier columns · chain lanes)
     You->>tui: c / f / a / x  — triage selected finding

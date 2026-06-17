@@ -139,9 +139,7 @@ impl RepoGraph {
     /// Forward multi-source BFS from every untrusted entry. Returns the shortest
     /// id-path to `target_id` if one exists, else None.
     pub fn reachable_from_untrusted(&self, target_id: &str) -> Option<Vec<String>> {
-        if self.node(target_id).is_none() {
-            return None;
-        }
+        self.node(target_id)?;
         let adj = self.adjacency();
         let mut prev: BTreeMap<&str, &str> = BTreeMap::new();
         let mut seen: BTreeMap<&str, bool> = BTreeMap::new();
