@@ -49,7 +49,7 @@ impl EvoState {
     pub fn save(&self, target_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir.join(".cannon"))?;
         let j = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(Self::path(target_dir), j)
+        crate::lock::write_atomic(&Self::path(target_dir), j.as_bytes())
     }
     pub fn get(&self, name: &str) -> Option<&Genome> {
         self.genomes.iter().find(|g| g.name == name)

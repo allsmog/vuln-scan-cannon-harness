@@ -108,7 +108,7 @@ pub async fn run_patch_one(
         .unwrap_or_else(|| "CONCERNS".to_string());
     let review_notes = parse_xml_tag(&rtext, "notes").unwrap_or_default();
 
-    let _ = std::fs::write(out_dir.join(format!("{}.diff", cand.id)), &diff);
+    let _ = crate::lock::write_atomic(&out_dir.join(format!("{}.diff", cand.id)), diff.as_bytes());
 
     PatchResult { id: cand.id.clone(), file: cand.file.clone(), diff, rationale, review, review_notes }
 }

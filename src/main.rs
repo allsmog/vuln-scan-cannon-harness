@@ -11,6 +11,7 @@ mod dynamic;
 mod fleet;
 mod framing;
 mod ledger;
+mod lock;
 mod metamorphic;
 mod generators;
 mod permute;
@@ -53,10 +54,22 @@ fn resolve_model(m: Option<String>) -> String {
 }
 
 fn new_results_dir(target_name: &str) -> Result<PathBuf> {
+    // Timestamp is second-precision, so two runs started in the same second
+    // would share a dir and overwrite each other's `run_NNN/result.json`.
+    // `create_dir` is atomic "create iff absent"; on collision append `-NNN`
+    // until one wins, guaranteeing every run gets its own directory.
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let d = PathBuf::from(results_root()).join(target_name).join(ts);
-    std::fs::create_dir_all(&d)?;
-    Ok(d)
+    let base = PathBuf::from(results_root()).join(target_name);
+    std::fs::create_dir_all(&base)?;
+    for n in 0..10_000 {
+        let d = if n == 0 { base.join(&ts) } else { base.join(format!("{ts}-{n:03}")) };
+        match std::fs::create_dir(&d) {
+            Ok(()) => return Ok(d),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("could not allocate a unique results dir under {}", base.display())
 }
 
 fn csv(s: &Option<String>) -> Vec<String> {
@@ -597,10 +610,11 @@ async fn cmd_fire(
     let verdicts = verify_all(&target, &accumulated, &model, &results_dir, concurrency, verify_top, votes).await;
     let triaged = triage(&accumulated, &verdicts);
 
-    // Merge into the persistent ledger (sticky human decisions).
-    let mut led = Ledger::load(&target.target_dir, &target.name);
-    let (added, updated) = led.merge(&triaged, &results_dir.display().to_string());
-    led.save(&target.target_dir)?;
+    // Merge into the persistent ledger (sticky human decisions). Reload-under-lock
+    // so a concurrent run's findings aren't clobbered by this merge.
+    let (led, (added, updated)) = Ledger::update(&target.target_dir, &target.name, |led| {
+        led.merge(&triaged, &results_dir.display().to_string())
+    })?;
     println!("{}", color(&format!("  ⊙ ledger: +{added} new, {updated} updated → {}", Ledger::md_path(&target.target_dir).display()), "report"));
 
     // Chains over the confirmed ledger set.
@@ -799,20 +813,19 @@ async fn execute_proposal(target: &TargetConfig, spec: &queue::ProposalSpec, mod
     let rounds = runner::run_salvo(target, &specs, &rd, &ctx, concurrency, false).await;
     let accumulated = accumulate(&rounds);
 
-    let mut led = Ledger::load(&target.target_dir, &target.name);
-    let confirmed = if spec.verify {
+    let (triaged, confirmed) = if spec.verify {
         let votes = if spec.votes > 0 { spec.votes } else { DEFAULT_VOTES };
         let verdicts = verify_items(target, accumulated.clone(), model, rd.join("verify"), concurrency.max(1), votes).await;
         let triaged = triage(&accumulated, &verdicts);
         let c = triaged.iter().filter(|t| t.confirmed()).count();
-        led.merge(&triaged, &rd.display().to_string());
-        c
+        (triaged, c)
     } else {
-        let triaged = triage(&accumulated, &BTreeMap::new());
-        led.merge(&triaged, &rd.display().to_string());
-        0
+        (triage(&accumulated, &BTreeMap::new()), 0)
     };
-    led.save(&target.target_dir)?;
+    // Reload-under-lock merge so a concurrent run isn't clobbered.
+    Ledger::update(&target.target_dir, &target.name, |led| {
+        led.merge(&triaged, &rd.display().to_string());
+    })?;
     let cost = (agent::total_cost_usd() - before).max(0.0);
     Ok((cost, accumulated.len(), confirmed, rd.display().to_string()))
 }
@@ -1040,7 +1053,7 @@ async fn cmd_patch(target_name: String, model: String, scope: String, concurrenc
     }
     results.sort_by(|a, b| a.id.cmp(&b.id));
 
-    std::fs::write(out_dir.join("PATCHES.json"), serde_json::to_string_pretty(&results)?)?;
+    lock::write_atomic(&out_dir.join("PATCHES.json"), serde_json::to_string_pretty(&results)?.as_bytes())?;
     let mut md = format!("# Patches — {}\n\n_Drafts for human review — cannon never applies diffs._\n\n", target.name);
     for r in &results {
         md.push_str(&format!("## {} · `{}`\n- review: **{}**\n", r.id, r.file, r.review));
@@ -1054,7 +1067,7 @@ async fn cmd_patch(target_name: String, model: String, scope: String, concurrenc
             md.push_str(&format!("```diff\n{}\n```\n\n", r.diff));
         }
     }
-    std::fs::write(out_dir.join("PATCHES.md"), md)?;
+    lock::write_atomic(&out_dir.join("PATCHES.md"), md.as_bytes())?;
     let (it, ot) = agent::total_tokens();
     println!("{}", color(&format!("  → {}  (${:.4}, {} tok)", out_dir.join("PATCHES.md").display(), agent::total_cost_usd(), it + ot), "report"));
     Ok(())
@@ -1072,7 +1085,7 @@ async fn cmd_threat_model(target_name: String, model: String) -> Result<()> {
 
 fn save_repo_graph(target: &TargetConfig, graph: &repomap::RepoGraph) -> Result<()> {
     std::fs::create_dir_all(target.target_dir.join(".cannon"))?;
-    std::fs::write(repomap::RepoGraph::json_path(&target.target_dir), serde_json::to_string_pretty(graph)?)?;
+    lock::write_atomic(&repomap::RepoGraph::json_path(&target.target_dir), serde_json::to_string_pretty(graph)?.as_bytes())?;
     Ok(())
 }
 
@@ -1127,21 +1140,26 @@ async fn cmd_seed(
         anyhow::bail!("no files given. Usage: cannon seed <target> <file...> [--format auto|sarif|semgrep|json|csv] [--verify]");
     }
     let target = TargetConfig::load(&target_name, &targets_root())?;
-    let mut led = Ledger::load(&target.target_dir, &target.name);
-    let mut new_sigs: Vec<String> = Vec::new();
-    let (mut total_added, mut total_updated) = (0, 0);
+    // Parse the seed files (no ledger involved) before taking the lock.
+    let mut parsed: Vec<(String, seed::Seeded)> = Vec::new();
     for file in &files {
-        let seeded = seed::parse_file(Path::new(file), &format)?;
-        let (a, u, ns) = led.merge_seeds(&seeded.findings, &seeded.source);
-        println!(
-            "  seeded {} finding(s) from {} ({})  → +{a} new, {u} updated",
-            seeded.findings.len(), file, seeded.source
-        );
-        total_added += a;
-        total_updated += u;
-        new_sigs.extend(ns);
+        parsed.push((file.clone(), seed::parse_file(Path::new(file), &format)?));
     }
-    led.save(&target.target_dir)?;
+    let (led, (total_added, total_updated, new_sigs)) = Ledger::update(&target.target_dir, &target.name, |led| {
+        let (mut total_added, mut total_updated): (usize, usize) = (0, 0);
+        let mut new_sigs: Vec<String> = Vec::new();
+        for (file, seeded) in &parsed {
+            let (a, u, ns) = led.merge_seeds(&seeded.findings, &seeded.source);
+            println!(
+                "  seeded {} finding(s) from {} ({})  → +{a} new, {u} updated",
+                seeded.findings.len(), file, seeded.source
+            );
+            total_added += a;
+            total_updated += u;
+            new_sigs.extend(ns);
+        }
+        (total_added, total_updated, new_sigs)
+    })?;
     println!(
         "{}",
         color(&format!("  ⊙ ledger: +{total_added} new, {total_updated} updated → {}", Ledger::md_path(&target.target_dir).display()), "report")
@@ -1156,8 +1174,7 @@ async fn cmd_seed(
             .collect();
         println!("{}", color(&format!("\n  ⚖ verifying {} newly-seeded finding(s)…", items.len()), "verify"));
         let verdicts = verify_items(&target, items, &model, target.target_dir.join(".cannon").join("verify"), concurrency, DEFAULT_VOTES).await;
-        let (c, fp) = led.apply_verdicts(&verdicts);
-        led.save(&target.target_dir)?;
+        let (_, (c, fp)) = Ledger::update(&target.target_dir, &target.name, |led| led.apply_verdicts(&verdicts))?;
         println!("{}", color(&format!("  → {c} confirmed, {fp} false-positive after verification"), "report"));
     } else if do_verify {
         println!("  (nothing new to verify)");
@@ -1169,7 +1186,7 @@ async fn cmd_seed(
 
 async fn cmd_verify(target_name: String, model: String, concurrency: usize, all: bool, votes: usize) -> Result<()> {
     let target = TargetConfig::load(&target_name, &targets_root())?;
-    let mut led = Ledger::load(&target.target_dir, &target.name);
+    let led = Ledger::load(&target.target_dir, &target.name);
     let items: Vec<AccumulatedFinding> = led
         .findings
         .iter()
@@ -1182,8 +1199,7 @@ async fn cmd_verify(target_name: String, model: String, concurrency: usize, all:
     }
     println!("{}", color(&format!("  ⚖ verifying {} finding(s) × {} votes…", items.len(), votes), "verify"));
     let verdicts = verify_items(&target, items, &model, target.target_dir.join(".cannon").join("verify"), concurrency, votes).await;
-    let (c, fp) = led.apply_verdicts(&verdicts);
-    led.save(&target.target_dir)?;
+    let (_, (c, fp)) = Ledger::update(&target.target_dir, &target.name, |led| led.apply_verdicts(&verdicts))?;
     println!("{}", color(&format!("  → {c} confirmed, {fp} false-positive (ledger updated → {})", Ledger::md_path(&target.target_dir).display()), "report"));
     Ok(())
 }
@@ -1297,14 +1313,14 @@ async fn cmd_bench(corpus: String, model: String, concurrency: usize, do_verify:
         "targets": rows.iter().map(|(n, s)| serde_json::json!({"target": n, "tp": s.tp, "fp": s.fp, "fn": s.fn_})).collect::<Vec<_>>(),
         "overall": {"tp": overall.tp, "fp": overall.fp, "fn": overall.fn_, "precision": overall.precision(), "recall": overall.recall(), "f1": overall.f1()},
     });
-    std::fs::write(root.join("bench.json"), serde_json::to_string_pretty(&report)?)?;
+    lock::write_atomic(&root.join("bench.json"), serde_json::to_string_pretty(&report)?.as_bytes())?;
     println!("  → {}", root.join("bench.json").display());
 
     // Regression gate: pin a baseline, or fail (exit 2) if F1 dropped below it.
     let baseline_path = root.join("bench-baseline.json");
     if write_baseline {
         let b = tune::Baseline::from_score(&overall);
-        std::fs::write(&baseline_path, serde_json::to_string_pretty(&b)?)?;
+        lock::write_atomic(&baseline_path, serde_json::to_string_pretty(&b)?.as_bytes())?;
         println!("{}", color(&format!("  ⊙ pinned baseline F1 {:.3} → {}", overall.f1(), baseline_path.display()), "report"));
     } else if gate {
         match std::fs::read_to_string(&baseline_path).ok().and_then(|s| serde_json::from_str::<tune::Baseline>(&s).ok()) {
@@ -1370,7 +1386,7 @@ async fn cmd_tune(corpus: String, model: String, variants_arg: Option<String>, d
         "best": best,
         "best_on_test": test_score.as_ref().map(|s| serde_json::json!({"precision": s.precision(), "recall": s.recall(), "f1": s.f1()})),
     });
-    std::fs::write(root.join("tune.json"), serde_json::to_string_pretty(&report)?)?;
+    lock::write_atomic(&root.join("tune.json"), serde_json::to_string_pretty(&report)?.as_bytes())?;
     println!("  → {}", root.join("tune.json").display());
     Ok(())
 }
@@ -1385,7 +1401,7 @@ async fn cmd_prove(target: String, model: String, concurrency: usize, votes: usi
 
 async fn cmd_metamorphic(target_name: String, model: String, id: Option<String>, scope: String, concurrency: usize, apply: bool) -> Result<()> {
     let target = TargetConfig::load(&target_name, &targets_root())?;
-    let mut led = Ledger::load(&target.target_dir, &target.name);
+    let led = Ledger::load(&target.target_dir, &target.name);
     let selected: Vec<(String, AccumulatedFinding)> = led
         .findings
         .iter()
@@ -1450,25 +1466,30 @@ async fn cmd_metamorphic(target_name: String, model: String, id: Option<String>,
         }
     }
     reports.sort_by(|a, b| a.id.cmp(&b.id));
-    std::fs::write(target.target_dir.join(".cannon").join("metamorphic.json"), serde_json::to_string_pretty(&reports)?)?;
+    crate::lock::write_atomic(&target.target_dir.join(".cannon").join("metamorphic.json"), serde_json::to_string_pretty(&reports)?.as_bytes())?;
 
     let mut flipped = 0;
     if apply {
-        for r in &reports {
-            if let Some(lf) = led.by_id_mut(&r.id) {
-                if lf.triaged_by != "human" {
-                    if let Some(ns) = metamorphic::reconcile(r.verdict_enum()) {
-                        if lf.status != ns {
-                            lf.status = ns.to_string();
-                            lf.triaged_by = "auto".into();
-                            lf.note = format!("metamorphic {}: orig={}, mutant={}{}", r.verdict, r.orig_vulnerable, r.mutant_vulnerable, if r.executed { " (executed)" } else { "" });
-                            flipped += 1;
+        // Reload-under-lock so verdicts apply to the freshest ledger.
+        let (_, n) = Ledger::update(&target.target_dir, &target.name, |led| {
+            let mut flipped = 0;
+            for r in &reports {
+                if let Some(lf) = led.by_id_mut(&r.id) {
+                    if lf.triaged_by != "human" {
+                        if let Some(ns) = metamorphic::reconcile(r.verdict_enum()) {
+                            if lf.status != ns {
+                                lf.status = ns.to_string();
+                                lf.triaged_by = "auto".into();
+                                lf.note = format!("metamorphic {}: orig={}, mutant={}{}", r.verdict, r.orig_vulnerable, r.mutant_vulnerable, if r.executed { " (executed)" } else { "" });
+                                flipped += 1;
+                            }
                         }
                     }
                 }
             }
-        }
-        led.save(&target.target_dir)?;
+            flipped
+        })?;
+        flipped = n;
     }
 
     let fp = reports.iter().filter(|r| r.verdict == "FALSE_POSITIVE").count();
@@ -1502,9 +1523,9 @@ async fn cmd_fleet(fleet_path: String, model: String, concurrency: usize, votes:
         let acc = accumulate(&rounds);
         let verdicts = verify_items(&target, acc.clone(), &model, rd.join("verify"), concurrency, votes).await;
         let triaged = triage(&acc, &verdicts);
-        let mut led = Ledger::load(&target.target_dir, &target.name);
-        led.merge(&triaged, &rd.display().to_string());
-        led.save(&target.target_dir)?;
+        Ledger::update(&target.target_dir, &target.name, |led| {
+            led.merge(&triaged, &rd.display().to_string());
+        })?;
         println!("    {} confirmed", triaged.iter().filter(|t| t.confirmed()).count());
     }
 
@@ -1553,9 +1574,9 @@ fn cmd_ingest(target_name: String, results_dir: String) -> Result<()> {
     let triaged: Vec<TriagedFinding> = serde_json::from_str(
         &std::fs::read_to_string(PathBuf::from(&results_dir).join("triage.json")).context("reading triage.json (run `cannon triage` first)")?,
     )?;
-    let mut led = Ledger::load(&target.target_dir, &target.name);
-    let (added, updated) = led.merge(&triaged, &results_dir);
-    led.save(&target.target_dir)?;
+    let (_, (added, updated)) = Ledger::update(&target.target_dir, &target.name, |led| {
+        led.merge(&triaged, &results_dir)
+    })?;
     println!("  ⊙ ledger: +{added} new, {updated} updated → {}", Ledger::md_path(&target.target_dir).display());
     Ok(())
 }
@@ -1584,16 +1605,13 @@ fn cmd_findings(sub: FindingsCmd) -> Result<()> {
         }
         FindingsCmd::Set { target, id, status, note } => {
             let t = TargetConfig::load(&target, &targets_root())?;
-            let mut led = Ledger::load(&t.target_dir, &t.name);
-            led.set_status(&id, &status, note)?;
-            led.save(&t.target_dir)?;
+            let (_, res) = Ledger::update(&t.target_dir, &t.name, |led| led.set_status(&id, &status, note))?;
+            res?;
             println!("  {} → {}", id, status);
         }
         FindingsCmd::Sync { target } => {
             let t = TargetConfig::load(&target, &targets_root())?;
-            let mut led = Ledger::load(&t.target_dir, &t.name);
-            let changed = led.sync_from_md(&t.target_dir);
-            led.save(&t.target_dir)?;
+            let (_, changed) = Ledger::update(&t.target_dir, &t.name, |led| led.sync_from_md(&t.target_dir))?;
             println!("  synced {changed} hand-edit(s) from VULN_FINDINGS.md");
         }
     }

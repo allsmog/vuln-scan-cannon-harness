@@ -152,10 +152,15 @@ impl Queue {
             .unwrap_or_default()
     }
 
+    pub fn lock_path(target_dir: &Path) -> std::path::PathBuf {
+        target_dir.join(".cannon").join(".queue.lock")
+    }
+
     pub fn save(&self, target_dir: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(target_dir.join(".cannon"))?;
+        let _lock = crate::lock::FileLock::acquire(Self::lock_path(target_dir))?;
         let j = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        std::fs::write(Self::json_path(target_dir), j)
+        crate::lock::write_atomic(&Self::json_path(target_dir), j.as_bytes())
     }
 
     /// Estimate (rounds, $) for a spec at the current calibrated rate. Verify

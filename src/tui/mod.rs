@@ -170,7 +170,7 @@ impl App {
         let chm = crate::viz::chains_mermaid(&self.chains);
         let html = build_html(&self.target.name, &strip_fence(&tmm), &strip_fence(&chm));
         let path = self.target.target_dir.join("dashboard.html");
-        std::fs::write(&path, html)?;
+        crate::lock::write_atomic(&path, html.as_bytes())?;
         let _ = std::process::Command::new("open").arg(&path).spawn();
         self.status = format!("opened {}", path.display());
         Ok(())

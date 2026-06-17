@@ -170,10 +170,41 @@ impl Ledger {
         Ledger { target: target_name.to_string(), findings: Vec::new(), next_id: 1 }
     }
 
+    pub fn lock_path(target_dir: &Path) -> std::path::PathBuf {
+        target_dir.join(".cannon").join(".ledger.lock")
+    }
+
+    /// Run `f` against the *freshest* on-disk ledger under an exclusive lock,
+    /// then persist atomically — the only safe way to mutate shared state from a
+    /// process that may race another `cannon`. Re-loading inside the lock is what
+    /// prevents lost updates: a copy loaded earlier (before a long async salvo)
+    /// would clobber whatever another run committed in the meantime. Returns the
+    /// merged ledger so callers can keep reading it, plus the closure's value.
+    pub fn update<F, R>(target_dir: &Path, target_name: &str, f: F) -> Result<(Ledger, R)>
+    where
+        F: FnOnce(&mut Ledger) -> R,
+    {
+        std::fs::create_dir_all(target_dir.join(".cannon"))?;
+        let _lock = crate::lock::FileLock::acquire(Self::lock_path(target_dir))?;
+        let mut led = Self::load(target_dir, target_name);
+        let r = f(&mut led);
+        led.write_files(target_dir)?;
+        Ok((led, r))
+    }
+
+    /// Persist under the lock (atomic writes). Use [`Ledger::update`] instead
+    /// whenever the mutation must not lose a concurrent writer's changes.
     pub fn save(&self, target_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(target_dir.join(".cannon"))?;
-        std::fs::write(Self::json_path(target_dir), serde_json::to_string_pretty(self)?)?;
-        std::fs::write(Self::md_path(target_dir), self.render_md())?;
+        let _lock = crate::lock::FileLock::acquire(Self::lock_path(target_dir))?;
+        self.write_files(target_dir)
+    }
+
+    /// Render and atomically write the three on-disk artifacts. Caller holds the lock.
+    fn write_files(&self, target_dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(target_dir.join(".cannon"))?;
+        crate::lock::write_atomic(&Self::json_path(target_dir), serde_json::to_string_pretty(self)?.as_bytes())?;
+        crate::lock::write_atomic(&Self::md_path(target_dir), self.render_md().as_bytes())?;
         // SARIF of everything not killed — for GitHub code scanning / CI.
         let rows: Vec<crate::sarif::SarifRow> = self
             .findings
@@ -187,9 +218,9 @@ impl Ledger {
                 message: format!("[{}] {}", f.id, f.title),
             })
             .collect();
-        std::fs::write(
-            target_dir.join("findings.sarif"),
-            serde_json::to_string_pretty(&crate::sarif::build_sarif("cannon", &rows))?,
+        crate::lock::write_atomic(
+            &target_dir.join("findings.sarif"),
+            serde_json::to_string_pretty(&crate::sarif::build_sarif("cannon", &rows))?.as_bytes(),
         )?;
         Ok(())
     }

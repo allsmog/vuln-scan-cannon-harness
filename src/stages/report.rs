@@ -35,8 +35,9 @@ pub fn write_threat_model(dir: &Path, tm: &ThreatModel) -> Result<()> {
     if !tm.focus_areas.is_empty() {
         parts.push(format!("\n## Seeded focus areas\n\n{}", tm.focus_areas.iter().map(|a| format!("- {a}")).collect::<Vec<_>>().join("\n")));
     }
-    std::fs::write(dir.join("THREAT_MODEL.md"), format!("{}\n", parts.join("\n")))?;
-    std::fs::write(dir.join("threat_model.json"), serde_json::to_string_pretty(tm)?)?;
+    // Atomic: this file may be shared (targets/<t>/) and read by a concurrent run.
+    crate::lock::write_atomic(&dir.join("THREAT_MODEL.md"), format!("{}\n", parts.join("\n")).as_bytes())?;
+    crate::lock::write_atomic(&dir.join("threat_model.json"), serde_json::to_string_pretty(tm)?.as_bytes())?;
     Ok(())
 }
 
@@ -80,8 +81,8 @@ fn confirmed_detail(t: &TriagedFinding) -> String {
 /// Persist chains as machine JSON + human CHAINS.md into `dir`.
 pub fn write_chains(dir: &Path, chains: &[Chain]) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("chains.json"), serde_json::to_string_pretty(chains)?)?;
-    std::fs::write(dir.join("CHAINS.md"), format!("# Attack chains\n\n{}\n", chains_section(chains)))?;
+    crate::lock::write_atomic(&dir.join("chains.json"), serde_json::to_string_pretty(chains)?.as_bytes())?;
+    crate::lock::write_atomic(&dir.join("CHAINS.md"), format!("# Attack chains\n\n{}\n", chains_section(chains)).as_bytes())?;
     Ok(())
 }
 
