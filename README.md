@@ -1,4 +1,13 @@
-# vuln-scan-cannon-harness
+# 🜂 cannon — the AI security harness that *reasons*
+
+[![CI](https://github.com/allsmog/vuln-scan-cannon-harness/actions/workflows/ci.yml/badge.svg)](https://github.com/allsmog/vuln-scan-cannon-harness/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/allsmog/vuln-scan-cannon-harness)](https://github.com/allsmog/vuln-scan-cannon-harness/releases)
+![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange)
+
+> **AI-native SAST in a single Rust binary** — agentic interprocedural taint resolution, a trust-graph reachability oracle, and metamorphic verification (**benchmarked head-to-head with [Semgrep](BENCHMARK.md)**), plus a human-gated, cost-estimated **[permutation planner](PERMUTATION.md)** with *incomplete-fix variant hunting*. An LLM security scanner that runs on your local Claude CLI — **your code never leaves your machine.**
+>
+> <sub>repo: `vuln-scan-cannon-harness` · keywords: AI SAST · LLM security scanner · Semgrep alternative · variant analysis · DevSecOps · AppSec</sub>
 
 Fire **salvos of permuted "defending-code" scans** at a single target, then
 **accumulate → triage → attack-chain → visualize** — managed through a persistent

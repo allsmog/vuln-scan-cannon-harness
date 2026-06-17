@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cannon — the AI security harness that reasons</title>
+<meta name="description" content="An AI-native security scanner in a single Rust binary: agentic taint resolution, a trust-graph reachability oracle, metamorphic verification, benchmarked head-to-head with Semgrep, and a human-gated, cost-estimated permutation planner with incomplete-fix variant hunting.">
+<meta name="keywords" content="AI SAST, LLM security scanner, static analysis, Semgrep alternative, vulnerability scanner, variant analysis, incomplete-fix hunting, DevSecOps, AppSec, Rust, Claude">
+<meta property="og:type" content="website">
+<meta property="og:title" content="cannon — the AI security harness that reasons">
+<meta property="og:description" content="Reasoning over context (taint / trust-graph / metamorphic), benchmarked vs Semgrep, plus a human-gated, cost-estimated permutation planner with incomplete-fix variant hunting. One local Rust binary.">
+<meta property="og:url" content="https://allsmog.github.io/vuln-scan-cannon-harness/">
+<meta name="twitter:card" content="summary">
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --green:#3fb950; --crit:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+  a { color:var(--accent); text-decoration:none; } a:hover { text-decoration:underline; }
+  .wrap { max-width:860px; margin:0 auto; padding:0 20px; }
+  header { text-align:center; padding:72px 20px 40px; }
+  h1 { font-size:54px; margin:0; letter-spacing:-1px; }
+  .tag { color:var(--dim); font-size:20px; margin:14px 0 0; }
+  .badges { margin:22px 0 0; }
+  .badges a { display:inline-block; margin:3px; }
+  .cta { margin:30px 0 0; }
+  .btn { display:inline-block; background:var(--accent); color:#0d1117; font-weight:600; padding:11px 22px; border-radius:7px; margin:5px; }
+  .btn.ghost { background:transparent; color:var(--fg); border:1px solid var(--border); }
+  mono, code, pre { font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace; }
+  .term { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px 20px; margin:32px 0; overflow-x:auto; font-size:13.5px; line-height:1.5; }
+  .term .c { color:var(--dim); } .term .g { color:var(--green); } .term .r { color:var(--crit); } .term .b { color:var(--accent); }
+  h2 { font-size:15px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin:48px 0 14px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:640px){ .grid{grid-template-columns:1fr;} h1{font-size:40px;} }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px; }
+  .card h3 { margin:0 0 6px; font-size:16px; }
+  .card p { margin:0; color:var(--dim); font-size:14px; }
+  footer { text-align:center; color:var(--dim); padding:50px 20px; font-size:14px; border-top:1px solid var(--border); margin-top:50px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>🜂 cannon</h1>
+    <p class="tag">The AI security harness that <em>reasons</em> — not just pattern-matches.</p>
+    <div class="badges">
+      <a href="https://github.com/allsmog/vuln-scan-cannon-harness"><img src="https://img.shields.io/github/stars/allsmog/vuln-scan-cannon-harness?style=social" alt="GitHub stars"></a>
+      <a href="https://github.com/allsmog/vuln-scan-cannon-harness/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="MIT"></a>
+      <img src="https://img.shields.io/badge/built%20with-Rust-orange" alt="Rust">
+    </div>
+    <div class="cta">
+      <a class="btn" href="https://github.com/allsmog/vuln-scan-cannon-harness">View on GitHub</a>
+      <a class="btn ghost" href="how-it-works.html">How it works</a>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <p>A single self-contained <strong>Rust binary</strong> that orchestrates your local, already-authenticated <strong>Claude CLI</strong> — so your code never leaves your machine. It fires permuted <em>defending-code</em> salvos at a target, then accumulates → adversarially verifies → manages a persistent findings ledger → attack-chains → visualizes, all in your terminal.</p>
+
+  <div class="term">
+<span class="c"># incomplete-fix hunting: re-examine a past security fix for the variant it missed</span>
+$ cannon permute permdemo --sources commits,threat-intel --budget 0.10 --yes
+    commits            +3 proposal(s)   <span class="c">← found the "Fix SQL injection in /search" commit</span>
+    threat-intel       +3 proposal(s)
+  <span class="g">✓</span> --yes: auto-approved 1 under the cap
+  <span class="b">▶</span> P-001 · Variant-hunt around the SQL injection fix (7088da15)
+  <span class="g">✓</span> P-001: 3 finding(s) · cost self-calibrated → $0.89/round
+
+  <span class="r">F-001  CRITICAL  SQL injection in /profile endpoint (variant the fix missed)   app.py:20</span>
+  </div>
+
+  <h2>What makes it different</h2>
+  <div class="grid">
+    <div class="card"><h3>Reasoning over context</h3><p>Agentic interprocedural taint resolution, a trust-graph reachability oracle, and metamorphic verification — it survives the false-positive traps that kill pattern scanners.</p></div>
+    <div class="card"><h3>Benchmarked vs Semgrep</h3><p>An honest head-to-head on OWASP BenchmarkJava with the same scorer — including where reasoning beats dataflow, and where it doesn't.</p></div>
+    <div class="card"><h3>Signal-driven permutation</h3><p>Commit archaeology (incl. incomplete-fix variant hunting), threat-model-as-plan, dependency footguns, and bred prompt variants — proposed into a human-gated, cost-capped queue.</p></div>
+    <div class="card"><h3>Local-first, single binary</h3><p>No broker, no database, no cloud. Your code stays on your infra; state is plain files on disk.</p></div>
+  </div>
+
+  <h2>Read more</h2>
+  <p>
+    → <a href="https://github.com/allsmog/vuln-scan-cannon-harness/blob/main/PERMUTATION.md">The permutation planner</a><br>
+    → <a href="https://github.com/allsmog/vuln-scan-cannon-harness/blob/main/BENCHMARK.md">Benchmark vs Semgrep</a><br>
+    → <a href="how-it-works.html">How it works (sequence diagram)</a><br>
+    → <a href="https://github.com/allsmog/vuln-scan-cannon-harness">Source on GitHub</a>
+  </p>
+</div>
+
+<footer>
+  cannon · MIT licensed · forked in shape from Anthropic's defending-code reference harness
+</footer>
+</body>
+</html>
