@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://allsmog.github.io/vuln-scan-cannon-harness/sitemap.xml
